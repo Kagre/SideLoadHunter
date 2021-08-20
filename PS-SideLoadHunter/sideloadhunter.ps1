@@ -1,4 +1,12 @@
-﻿#Importing Get-Hash helper function for ps2 systems from jaredcatkinson. Credit: https://gist.github.com/jaredcatkinson/7d561b553a04501238f8e4f061f112b7
+﻿if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator"))
+{Write-Output 'Running as Administrator!'}
+else
+{
+    Write-Output 'Rerun Script as Administrator'
+    exit 
+}
+
+#Importing Get-Hash helper function for ps2 systems from jaredcatkinson. Credit: https://gist.github.com/jaredcatkinson/7d561b553a04501238f8e4f061f112b7
 function Get-Hash
 {
     <#
@@ -1899,14 +1907,6 @@ $SusDLLListArray | Export-csv -NoTypeInformation $CollectionPath\SuspiciousDllsL
 ## End suspicious DLL Audit
 
 ## End Suspicious Bin Audit
-
-if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator"))
-{Write-Output 'Running as Administrator!'}
-else
-{
-    Write-Output 'Rerun Script as Administrator'
-    exit 
-}
 
 Write-Host "Creating output folder in current working directory"
 $CollectionPath =".\" + $ENV:COMPUTERNAME + "_" + (Get-Date).tostring("yyyyMMdd")
