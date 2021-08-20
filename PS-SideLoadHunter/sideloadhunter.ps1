@@ -124,7 +124,7 @@ function Get-Hash
     }
 }
 
-##Start Shimcache Functions
+#region Start Shimcache Functions
 function Get-SusShimCachePS45
 {
     ## Importing Helper Functions from PS-DigitalForensics https://github.com/davidhowell-tx/PS-DigitalForensics Credit: David Howell ##
@@ -1039,8 +1039,9 @@ if ($AppCompatCache -ne $null) {
 
 }
 ##End Shimcache Functions
+#endregion
 
-##Start side load detects
+#region Start side load detects
 Function Get-SideLoadDetectsPS45
 {
 $SideLoadDetectArray = @()
@@ -1258,11 +1259,10 @@ $SideLoadDetectArray | Export-csv -NoTypeInformation $CollectionPath\SideLoadDet
 
 
 }
-
 ## End Sideload Detects
+#endregion
 
-## Start Suspicious Bin Audit
-
+#region Start Suspicious Bin Audit
 Function Get-SusExecsPS45
 {
 write-host "Analyzing binaries in userland"
@@ -1593,9 +1593,10 @@ $SusBinListArray | Export-csv -NoTypeInformation $CollectionPath\SuspiciousBinsL
 
 # End of PRocess Dump
 }
-
 ## End Suspicious Bin Audit
-## Start Suspicious DLL Audit
+#endregion
+
+#region Start Suspicious DLL Audit
 Function Get-SusDllsPS45
 {
 write-host "Analyzing DLLs in userland"
@@ -1905,8 +1906,7 @@ $SusDLLListArray | Export-csv -NoTypeInformation $CollectionPath\SuspiciousDllsL
 
 }
 ## End suspicious DLL Audit
-
-## End Suspicious Bin Audit
+#endregion
 
 Write-Host "Creating output folder in current working directory"
 $CollectionPath =".\" + $ENV:COMPUTERNAME + "_" + (Get-Date).tostring("yyyyMMdd")
