@@ -496,113 +496,38 @@ if ($AppCompatCache -ne $null) {
 #endregion
 
 #region Start side load detects
-Function Get-SideLoadDetectsPS45
-{
-$SideLoadDetectArray = @()
- 
-$count = 0
+Function Get-SideLoadDetectsPS45{
+<#
+.DESCRIPTION
+Get-SideLoadDetect 
+  Comparative analysis function designed to identify situations where a 
+  System32/SysWow64 executable is located in a userland directory along with a 
+  DLL that matches a System32/SysWow64 DLL name but is not signed by Microsoft.
 
-foreach($UserLandDLL in $UserLandDLLs)
-{
-    
-   if ($Sys32DLLList.Name -contains $UserLandDLL.Name)
-   {
-        $UserLandExes=""
-        [array]$check = $Sys32DLLList | where {$_.Name -eq $UserLandDLL.Name}
-        if($check.Length -gt 1)
-        {
-            foreach($dll in $check)
-            {
-                $DllSigResult = Get-AuthenticodeSignature $dll.FullName -ErrorAction Ignore
-                $CertSubject = Get-AuthenticodeSignature $dll.FullName | ` Select-Object -Property @{Name='Subject';Expression={($_.SignerCertificate.Subject)}}
-                $MSSubject = "CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
-                if ($CertSubject.Subject -ne $MSSubject)
-                {
-                    $UserLandExes = Get-ChildItem $dll.Directory -ErrorAction SilentlyContinue | Where-Object {($_.Extension -like ".exe")} -ErrorAction SilentlyContinue
-                    foreach($UserLandExe in $UserLandExes)
-                    {
-                                              
-                        if($UserLandExe.VersionInfo.OriginalFileName)
-                        {
-                            [string]$UserLandExeOGName = $UserLandExe.VersionInfo.OriginalFileName.replace(".MUI","")
-                        }
-                        if (($Sys32BinList.Name -contains $UserLandExeOGName) -or ($Sys32BinList.Name -contains $UserLandExe.Name))
-                        {
-                            if ($PSVersionTable.PSVersion.Major -lt 4)
-                            {
-                                $DllHash = Get-Hash -Algorithm MD5 -FilePath $UserLandDLL.FullName -ErrorAction SilentlyContinue
-                            }
-                            else
-                            {
-                                $DllHash = Get-FileHash -Algorithm MD5 $UserLandDLL.FullName -ErrorAction SilentlyContinue
-                            }
-                            
-                            $SideLoadDetectObject = New-Object psobject
-                            $SideLoadDetectObject | Add-Member -MemberType NoteProperty -Name "ComputerName" -Value $env:COMPUTERNAME
-                            $SideLoadDetectObject | Add-Member -MemberType NoteProperty -Name "SideLoadExe" -Value $UserLandExe.FullName
-                            $SideLoadDetectObject | Add-Member -MemberType NoteProperty -Name "SideLoadExeOriginalFilename" -Value $UserLandExe.VersionInfo.OriginalFileName
-                            $SideLoadDetectObject | Add-Member -MemberType NoteProperty -Name "SideLoadDLL" -Value $dll.FullName
-                            $SideLoadDetectObject | Add-Member -MemberType NoteProperty -Name "DLLHash" -Value $dll.Hash
-                            $SideLoadDetectObject | Add-Member -MemberType NoteProperty -Name "SigStatus" -Value $DllSigResult.Status
-                            $SideLoadDetectArray += $SideLoadDetectObject
-                        }
-                    }
-                }
-            }
-        }
-        if($check.Length -eq 1)
-        {
-            
-            $DllSigResult = Get-AuthenticodeSignature $UserLandDLL.FullName -ErrorAction Ignore
-            $CertSubject = Get-AuthenticodeSignature $UserLandDLL.FullName | ` Select-Object -Property @{Name='Subject';Expression={($_.SignerCertificate.Subject)}}
-            $MSSubject = "CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
-            
-                      
-               $UserLandExes = Get-ChildItem $UserLandDLL.Directory -ErrorAction SilentlyContinue | Where-Object {($_.Extension -like ".exe")} -ErrorAction SilentlyContinue
-               foreach($UserLandExe in $UserLandExes)
-               {
-                if($UserLandExe.VersionInfo.OriginalFileName)
-                {
-                      [string]$UserLandExeOGName = $UserLandExe.VersionInfo.OriginalFileName.replace(".MUI","")
-                }
+.NOTES
+ToDo:
++ Confirm process accounts for any unsigned system DLL in a user folder
+#>param()
+  $SysBinNames = $32BinNames + $64BinNames | sort-object -Unique
+  $SysDLLNames = $32DLLNames + $64DLLNames | sort-object -Unique
 
-                if ($CertSubject.Subject -ne $MSSubject)
-                {
-                    if ($Sys32BinList.Name -contains $UserLandExeOGName)
-                    {
-                        if ($PSVersionTable.PSVersion.Major -lt 4)
-                            {
-                                $DllHash = Get-Hash -Algorithm MD5 -FilePath $UserLandDLL.FullName -ErrorAction SilentlyContinue
-                            }
-                            else
-                            {
-                                $DllHash = Get-FileHash -Algorithm MD5 $UserLandDLL.FullName -ErrorAction SilentlyContinue
-                            }
-                        $SideLoadDetectObject = New-Object psobject
-                        $SideLoadDetectObject | Add-Member -MemberType NoteProperty -Name "ComputerName" -Value $env:COMPUTERNAME
-                        $SideLoadDetectObject | Add-Member -MemberType NoteProperty -Name "SideLoadExe" -Value $UserLandExe.FullName
-                        $SideLoadDetectObject | Add-Member -MemberType NoteProperty -Name "SideLoadExeOriginalFilename" -Value $UserLandExe.VersionInfo.OriginalFileName
-                        $SideLoadDetectObject | Add-Member -MemberType NoteProperty -Name "SideLoadDLL" -Value $UserLandDLL.FullName
-                        $SideLoadDetectObject | Add-Member -MemberType NoteProperty -Name "DLLHash" -Value $DllHash.Hash
-                        $SideLoadDetectObject | Add-Member -MemberType NoteProperty -Name "SigStatus" -Value $DllSigResult.Status
-                        $SideLoadDetectArray += $SideLoadDetectObject
-                    }
-                 }
-               }
-                        
-        }
+  $UserLandBins.where{$_.Name.ToUpperInvariant() -in $SysBinNames -or $_.OGName.ToUpperInvariant() -in $SysBinNames}.foreach{
+    $uBIN = $_
+    $uDLLs = $InfoByPathByType.($uBIN.Path).dll
+    $uDLLs.where{!$_.SaysMS -and $_.Name.ToUpperInvariant() -in $SysDLLNames}.foreach{
+      $uDLL = $_
+      write-output [PSCustomObject]@{
+        ComputerName = $env:COMPUTERNAME
+        SideLoadExe  = $uBIN.FullName
+        SideLoadExeOriginalFilename = $uBIN.File.VersionInfo.OriginalFileName
+        SideLoadDLL  = $uDLL.FullName
+        DLLHash      = $uDLL.Hash.MD5
+        SigStatus    = $uDLL.Sig.Status
+      }
     }
-    
-
+  } | Export-csv -NoTypeInformation $CollectionPath\SideLoadDetections.csv
 }
-
-
-$SideLoadDetectArray | Export-csv -NoTypeInformation $CollectionPath\SideLoadDetections.csv
-
-# End of PRocess Dump
-}
-## End Sideload Detects
-#endregion
+#endregion Sideload Detects
 
 #region Start Suspicious Bin Audit
 Function Get-SusExecsPS45
@@ -924,7 +849,108 @@ $SusDLLListArray | Export-csv -NoTypeInformation $CollectionPath\SuspiciousDllsL
 ## End suspicious DLL Audit
 #endregion
 
-$ErrorActionPreference = "SilentlyContinue"
+$ErrorActionPreference = "Continue"
+
+#region Collect File Info
+set-variable -Option ReadOnly -Name MSSubject -Value 'CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
+set-variable -Option ReadOnly -Name System32  -Value "$env:SystemRoot\System32\"
+set-variable -Option ReadOnly -Name SysWOW64  -Value "$env:SystemRoot\SysWOW64\"
+$FullList = new-object System.Collections.ArrayList
+$MagicErrors  = new-object System.Collections.ArrayList
+
+$Sys32BinList = new-object System.Collections.ArrayList
+$Sys64BinList = new-object System.Collections.ArrayList
+$UserLandBins = new-object System.Collections.ArrayList
+$Sys32DLLList = new-object System.Collections.ArrayList
+$Sys64DLLList = new-object System.Collections.ArrayList
+$UserLandDLLs = new-object System.Collections.ArrayList
+$InfoByPathByType = @{}
+
+$FileCount = 0
+filter ProcessFile{ $file = $_
+  try{$PE_Magic = get-content $file -TotalCount 2 -Encoding Byte -ErrorAction Ignore}catch {
+    $PE_Magic = new-object byte[] 2
+    if($file.FullName -match '[[\]]'){
+      #get-content has a known bug with square brackets
+      try{
+        $r = $file.OpenRead()
+        $null = $r.Read($PE_Magic,0,2)
+      }catch {$_|fl * -force|out-string|write-host -Background Black -Foreground Red}finally {$r.Close()}
+    }else{
+      write-warning "Magic Error: $($file.FullName)"
+      $null = $MagicErrors.Add(@{
+        Name = $file.FullName
+        Ref  = $file
+      })
+    }
+  }
+  $isMagic = $PE_Magic.Length -eq 2 -and $PE_Magic[0] -eq 0x4D -and $PE_Magic[1] -eq 0x5A
+  if($isMagic -or $File.Extension -in '.exe','.dll','.sys','.com','.scr'){
+    $info = @{
+      Name     = $file.Name
+      OGName   = $file.VersionInfo.OriginalFileName
+      FullName = $file.FullName
+      File     = $file
+      Path     = $file.Directory.FullName
+      Local    = switch($true){
+        ({$file.FullName.StartsWith($System32)}){'Sys32';break}
+        ({$file.FullName.StartsWith($SysWOW64)}){'Sys64';break}
+        default{'UserLand';break}
+      }
+      fType    = $file.Extension.Substring(1).ToLowerInvariant()
+      isMagic  = $isMagic
+      Hash     = HashThis (get-content $file -Raw -Encoding Byte -ErrorAction Ignore)
+      Sig      = Get-AuthenticodeSignature $file -ErrorAction Ignore
+    }
+    $info.SaysMS = $info.Sig.SignerCertificate.Subject -eq $MSSubject
+    if($info.OGName -ne $null)
+      {$info.OGName = $info.OGName.Replace('.MUI','')}
+    
+    switch($info.Local){
+      'Sys32'
+        {if($info.fType -eq 'dll'){$null=$Sys32DLLList.Add($info)}else{$null=$Sys32BinList.Add($info)};break;}
+      'Sys64'
+        {if($info.fType -eq 'dll'){$null=$Sys64DLLList.Add($info)}else{$null=$Sys64BinList.Add($info)};break;}
+      'UserLand'
+        {if($info.fType -eq 'dll'){$null=$UserLandDLLs.Add($info)}else{$null=$UserLandBins.Add($info)};break;}
+    }
+
+    $iPath = $info.Path; $iType = $info.fType
+    if($InfoByPathByType.$iPath -eq $null){
+      $InfoByPathByType.$iPath = @{$iType = new-object System.Collections.ArrayList}
+    }elseif($InfoByPathByType.$iPath.$iType -eq $null){
+      $InfoByPathByType.$iPath.$iType = new-object System.Collections.ArrayList
+    }
+    $null=$InfoByPathByType.$iPath.$iType.Add($info)
+
+    $null=$FullList.Add($info)
+  }
+  if(!(++$FileCount % 500))
+    {write-automated ('Files Reviewed:{0,15:#,##0}; Identified:{1,15:#,##0} {2:0.0%}' -f $FileCount,$FullList.Count,($FullList.Count/$FileCount))}
+}
+
+@(
+  $System32,
+  $SysWOW64,
+  "$env:HOMEDRIVE\Users",
+  "$env:HOMEDRIVE\ProgramData",
+  "$env:HOMEDRIVE\Intel",
+  "$env:HOMEDRIVE\Recovery"
+) | get-childitem -File -Force -Recurse -ErrorAction Ignore | ProcessFile
+
+$32BinNames = $Sys32BinList.Name.ToUpperInvariant() | sort-object -Unique
+$64BinNames = $Sys64BinList.Name.ToUpperInvariant() | sort-object -Unique
+$32DLLNames = $Sys32DLLList.Name.ToUpperInvariant() | sort-object -Unique
+$64DLLNames = $Sys64DLLList.Name.ToUpperInvariant() | sort-object -Unique
+
+$64BinsOnly = new-object System.Collections.ArrayList
+$Sys64BinList.where{$_.Name.ToUpperInvariant() -NotIn $32BinNames}.foreach{$null = $64BinsOnly.Add($_)}
+
+$64DllsOnly = new-object System.Collections.ArrayList
+$Sys64DLLList.where{$_.Name.ToUpperInvariant() -NotIn $32DLLNames}.foreach{$null = $64DLLOnly.Add($_)}
+#endregion
+
+<#
 $Sys32BinList = Get-ChildItem $env:SystemRoot\system32\ -Recurse -ErrorAction SilentlyContinue | Where-Object {($_.Extension -like ".exe")} -ErrorAction SilentlyContinue | Select Name, FullName
 $Sys64BinList = Get-ChildItem $env:SystemRoot\syswow64\ -Recurse -ErrorAction SilentlyContinue | Where-Object {($_.Extension -like ".exe")} -ErrorAction SilentlyContinue | Select Name, FullName
 $64BinsOnly = Compare-Object -ReferenceObject $Sys64BinList.Name -DifferenceObject $Sys32BinList.Name | Where-Object SideIndicator -eq '<=' | Select InputObject
@@ -933,7 +959,22 @@ $Sys32DLLList = Get-ChildItem $env:SystemRoot\system32\ -Recurse -ErrorAction Si
 $Sys64DLLList = Get-ChildItem $env:SystemRoot\syswow64\ -Recurse -ErrorAction SilentlyContinue | Where-Object {($_.Extension -like ".dll")} -ErrorAction SilentlyContinue | Select Name, FullName
 $UserLandDLLs = Get-ChildItem -Path $env:HOMEDRIVE\Users , $env:HOMEDRIVE\ProgramData, $env:HOMEDRIVE\Intel, $env:HOMEDRIVE\Recovery -Force -Recurse -ErrorAction SilentlyContinue | Where-Object {($_.Extension -like ".dll")} -ErrorAction SilentlyContinue
 $64DllsOnly = Compare-Object -ReferenceObject $Sys64DLLList.Name -DifferenceObject $Sys32DLLList.Name | Where-Object SideIndicator -eq '<=' | Select InputObject
+#>
 Get-SideLoadDetectsPS45
 Get-SusShimCachePS45
 Get-SusExecsPS45
 Get-SusDllsPS45
+
+<#
+$bySig = @{}
+ls *.exe | %{
+  $sig = Get-AuthenticodeSignature $_
+  try{$at = $sig.SignerCertificate.Thumbprint}catch {$at = 'none'}
+  if(!$bySig.$at){$bySig.$at = new-object System.Collections.ArrayList}
+  $null = $bySig.$at.add(@{
+    Name     = $_.Name
+    FullName = $_.FullName
+    Sig      = $sig
+  })
+}
+#>
