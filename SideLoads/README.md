@@ -106,3 +106,4 @@ Executables and associated DLL filenames that are susceptible to sideloading
 | WFS.exe                |  scansetting.dll         |
 | WFS.exe                |  WindowsCodecs.dll       |
 | wsqmcons.exe           |  KtmW32.dll              |
+| wermgr.exe             |  wer.dll                 |
