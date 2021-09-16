@@ -596,16 +596,6 @@ filter ProcessFile{
 
     OrganizeThis $InfoByPathByType $iPath,$iType $info
     
-<# dep use: OrganizeThis
-    $iPath = $info.Path; $iType = $info.fType
-    if($InfoByPathByType.$iPath -eq $null){
-      $InfoByPathByType.$iPath = @{$iType = new-object System.Collections.ArrayList}
-    }elseif($InfoByPathByType.$iPath.$iType -eq $null){
-      $InfoByPathByType.$iPath.$iType = new-object System.Collections.ArrayList
-    }
-    $null=$InfoByPathByType.$iPath.$iType.Add($info)
-#>
-
     $null=$FullList.Add($info)
   }
   if(!(++$FileCount % 500))
@@ -641,17 +631,3 @@ Get-SusShimCachePS45
 Get-SusExecsPS45
 Get-SusDllsPS45
 #endregion
-
-<#
-$bySig = @{}
-ls *.exe | %{
-  $sig = Get-AuthenticodeSignature $_
-  try{$at = $sig.SignerCertificate.Thumbprint}catch {$at = 'none'}
-  if(!$bySig.$at){$bySig.$at = new-object System.Collections.ArrayList}
-  $null = $bySig.$at.add(@{
-    Name     = $_.Name
-    FullName = $_.FullName
-    Sig      = $sig
-  })
-}
-#>
