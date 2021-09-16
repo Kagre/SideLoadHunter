@@ -68,17 +68,42 @@ $SHA256 = [System.Security.Cryptography.HashAlgorithm]::Create('SHA256')
 function HashThis{
   param([byte[]]$bar)process{
   if($bar -eq $null){return $null}
-  write-output @{
+  write-output (@{
     MD5    = [BitConverter]::ToString($MD5.ComputeHash($bar)).Replace('-','')
     SHA1   = [BitConverter]::ToString($SHA1.ComputeHash($bar)).Replace('-','')
     SHA256 = [BitConverter]::ToString($SHA256.ComputeHash($bar)).Replace('-','')
-  }
+  })
 }}
+
+function OrganizeThis{
+  param(
+    [hashtable]$collection,
+    [string[]]$keys,
+    [parameter(ValueFromPipeline=$true)]
+    $value
+  )
+  begin{
+    if($keys.Count -lt 1){return}
+    $at = $collection
+    for($i=0;$i -lt $keys.Count - 1;$i++){
+      $k = $keys[$i]
+      if($at.$k -eq $null)
+        {$at.$k = @{}}
+      $at = $at.$k
+    }
+    $k = $keys[$i]
+    if($at.$k -eq $null)
+      {$at.$k = new-object System.Collections.ArrayList}
+  }process{
+    $null = $at.$k.Add($value)
+  }
+}
 #endregion
 
 write-automated "Creating output folder in current working directory"
-$CollectionPath =".\" + $ENV:COMPUTERNAME + "_" + (Get-Date).tostring("yyyyMMdd")
-$null = New-Item $CollectionPath -Type Directory -Force
+$CollectionPath = ".\${ENV:COMPUTERNAME}_{0}" -f (Get-Date -format 'yyyyMMdd')
+$CollectionPath = New-Item $CollectionPath -Type Directory -Force
+$CollectionPath = $CollectionPath.FullName
 $LRInvocation = $MyINvocation.InvocationName
 
 write-automated "Gathering collection of userland DLLs"

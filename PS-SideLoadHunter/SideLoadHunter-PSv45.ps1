@@ -3,96 +3,136 @@
 sideloadhunter.ps1
 #>param([switch]$AutoRun)
 
-#region Start Shimcache Functions
-function Get-SusShimCachePS45
-{
-    ## Importing Helper Functions from PS-DigitalForensics https://github.com/davidhowell-tx/PS-DigitalForensics Credit: David Howell ##
-    write-host "Analyzing Program Execution Evidence"
-    $SusShimCacheArray = @()
-    $count = 0
-    # Initialize Array to store our data
-$EntryArray=@()
-$AppCompatCache=$Null
+#region Start side load detects
+Function Get-SideLoadDetectsPS45{
+<#
+.DESCRIPTION
+Get-SideLoadDetect 
+  Comparative analysis function designed to identify situations where a 
+  System32/SysWow64 executable is located in a userland directory along with a 
+  DLL that matches a System32/SysWow64 DLL name but is not signed by Microsoft.
 
-switch($PSCmdlet.ParameterSetName) {
-	"Path" {
-		if (Test-Path -Path $Path) {
-			# Get the Content of the .reg file, only return lines with Hexadecimal values on them, and remove the backslashes, spaces, and wording at the start
-			$AppCompatCache = Get-Content -Path $Path | Select-String -Pattern "[A-F0-9][A-F0-9]," | ForEach-Object { $_ -replace "(\\|,|`"AppCompatCache`"=hex:|\s)","" }
-			# Join all of the hexadecimal into one big string
-			$AppCompatCache = $AppCompatCache -join ""
-			# Convert the Hexadecimal string to a byte array
-			$AppCompatCache = $AppCompatCache -split "(?<=\G\w{2})(?=\w{2})" | ForEach-Object { [System.Convert]::ToByte( $_, 16 ) }
-			# Thanks to beefycode for that code snippet: http://www.beefycode.com/post/Convert-FromHex-PowerShell-Filter.aspx
-		}
-	}
-	
-	Default {
-		if (!(Get-PSDrive -Name HKLM -PSProvider Registry)) {
-			New-PSDrive -Name HKLM -PSProvider Registry -Root HKEY_LOCAL_MACHINE
-		}
-		# This command gets the current AppCompat Cache, and returns it in a Byte Array.
-		if (Get-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Session Manager\AppCompatCache\' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty AppCompatCache) {
-			# This is the Windows 2003 and later location of AppCompatCache in the registry
-			$AppCompatCache = Get-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Session Manager\AppCompatCache\' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty AppCompatCache
-		} else {
-			# If the normal area is not available, try the Windows XP location.
-			# Note, this piece is untested as I don't have a Windows XP system to work with.
-			$AppCompatCache = Get-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Session Manager\AppCompatibility\AppCompatCache' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty AppCompatCache
-		}
-	}
+.NOTES
+ToDo:
++ Confirm process accounts for any unsigned system DLL in a user folder
+#>
+  param(
+    [string]
+    #Specifies the path to the new report file
+    $Destination = (join-path $CollectionPath 'SideLoadDetections.csv')
+  )
+  
+  $UserLandBins.where{$_.Name.ToUpperInvariant() -in $SysBinNames -or ($_.OGName -ne $null -and $_.OGName.ToUpperInvariant() -in $SysBinNames)}.foreach{
+    $uBIN  = $_
+    $uDLLs = $InfoByPathByType.($uBIN.Path).dll
+    $uDLLs.where{!$_.SaysMS -and $_.Name.ToUpperInvariant() -in $SysDLLNames}.foreach{
+      $uDLL = $_
+      write-output ([PSCustomObject]@{
+        ComputerName = $env:COMPUTERNAME
+        SideLoadExe  = $uBIN.FullName
+        SideLoadExeOriginalFilename = $uBIN.File.VersionInfo.OriginalFileName
+        SideLoadDLL  = $uDLL.FullName
+        DLLHash      = $uDLL.Hash.MD5
+        SigStatus    = $uDLL.Sig.Status
+      })
+    }
+  } | Export-csv -NoTypeInformation $Destination
 }
+#endregion Sideload Detects
 
-if ($AppCompatCache -ne $null) {
+#region Start Shimcache Functions
+function Get-SusShimCachePS45{
+<#
+.DESCRIPTION
+Get-SusShimcache 
+  To provide some detection capabilities for sideloaded executables that are no
+  longer on disk, SusShimcache will analyze ShimCache entries for System32 and 
+  SysWow64 executables have executed from a non-standard location.
+#>
+  param(
+    [Parameter(Mandatory = $true, ParameterSetName = 'Path')]
+    [string]
+    #Use this parameter to run against a .reg file export of the Shim Cache.
+    $Path
+  )
+
+  ## Importing Helper Functions from PS-DigitalForensics https://github.com/davidhowell-tx/PS-DigitalForensics Credit: David Howell ##
+  write-host "Analyzing Program Execution Evidence"
+  # Initialize Array to store our data
+  $ShimCacheBins  = new-object System.Collections.ArrayList
+  $AppCompatCache = $Null
+
+  switch($PSCmdlet.ParameterSetName) {
+    "Path" {
+      if (Test-Path -Path $Path) {
+        # Get the Content of the .reg file, only return lines with Hexadecimal values on them, and remove the backslashes, spaces, and wording at the start
+        $hex = (get-content -Path $Path -raw) -replace '(.|\s)*?"AppCompatCache"=hex:([^"]*)(.|\s)*','$2' -replace '[^0-9a-f]',''
+        $AppCompatCache = new-object byte[] ($hex.Length/2)
+        for($i=0;$i -lt $hex.Length;$i+=2){
+          $AppCompatCache[$i/2] = [System.Convert]::ToByte($hex.Substring($i,2),16)
+        }
+      }
+    }
+    
+    Default {
+      if (!(Get-PSDrive -Name HKLM -PSProvider Registry)) {
+        New-PSDrive -Name HKLM -PSProvider Registry -Root HKEY_LOCAL_MACHINE
+      }
+      # This command gets the current AppCompat Cache, and returns it in a Byte Array.
+      push-location 'HKLM:\System\CurrentControlSet\Control\Session Manager'
+      if(test-path '.\AppCompatCache'){
+        # This is the Windows 2003 and later location of AppCompatCache in the registry
+        $AppCompatCache = (Get-ItemProperty '.\AppCompatCache').AppCompatCache
+      }elseif(test-path '.\AppCompatibility\AppCompatCache'){
+        # If the normal area is not available, try the Windows XP location.
+        # Note, this piece is untested as I don't have a Windows XP system to work with.
+        $AppCompatCache = (Get-ItemProperty '.\AppCompatibility\AppCompatCache').AppCompatCache
+      }
+      pop-location
+    }
+  }
+
+  if($AppCompatCache.Count -le 0){return}
 
 	# Initialize a Memory Stream and Binary Reader to scan through the Byte Array
-	$MemoryStream = New-Object System.IO.MemoryStream(,$AppCompatCache)
-	$BinReader = New-Object System.IO.BinaryReader $MemoryStream
-	$UnicodeEncoding = New-Object System.Text.UnicodeEncoding
-	$ASCIIEncoding = New-Object System.Text.ASCIIEncoding
+	$MemoryStream    = [System.IO.MemoryStream]::new($AppCompatCache)
+	$BinReader       = [System.IO.BinaryReader]::new($MemoryStream)
+	$UnicodeEncoding = [System.Text.Encoding]::Unicode
+#	$ASCIIEncoding   = [System.Text.Encoding]::ASCII
 
 	# The first 4 bytes of the AppCompatCache is a Header.  Lets parse that and use it to determine which format the cache is in.
-	$Header = ([System.BitConverter]::ToString($BinReader.ReadBytes(4))) -replace "-",""
-
-	switch ($Header) {
-
-       # 0x34 - Windows 10 Creators update
-        "34000000" {
-                
-                #read past header
-                $BinReader.ReadBytes(48) | Out-Null
-            
-                #$NumberOfEntries = 760 # can't locate the number of entries in header - read until error
-                $EntryNum = 0
-                while($True){
-                    try{
-                        $TempObject = "" | Select-Object -Property Name, Time, Data, EntryNumber
-                        $TempObject | Add-Member -MemberType NoteProperty -Name "Tag" -Value ($ASCIIEncoding.GetString($BinReader.ReadBytes(4)))
-                        $BinReader.ReadBytes(4) | Out-Null
-                        $CacheEntrySize = [System.BitConverter]::ToUInt32($BinReader.ReadBytes(4),0)
-                        $NameLength = [System.BitConverter]::ToUInt16($BinReader.ReadBytes(2),0)
-                        # This probably needs to be NameLength * 2 if the length is the number of unicode characters - need to verify
-                        
-                        $TempObject.Name = $UnicodeEncoding.GetString($BinReader.ReadBytes($NameLength))
-                        #write-host $TempObject.FileName #dbg
-                        $TempObject.Time = [DateTime]::FromFileTime([System.BitConverter]::ToUInt64($BinReader.ReadBytes(8),0)).ToString("G")
-                        $DataLength = [System.BitConverter]::ToUInt32($BinReader.ReadBytes(4),0)
-                        $TempObject.Data = $ASCIIEncoding.GetString($BinReader.ReadBytes($DataLength))
-                        $TempObject.EntryNumber = $EntryNum
-                        $EntryArray += $TempObject
-                        $EntryNum++
-                    }catch{
-                        break
-                    }
-                    
-                }
-                #return
-
-                
-            }
-
-		# 0x30 - Windows 10
-		"30000000" {
+	switch ($BinReader.ReadInt32()) {
+    0x00000034 { # Windows 10 Creators update
+    
+      #read past header
+      $null = $BinReader.ReadBytes(48)
+  
+      #$NumberOfEntries = 760 # can't locate the number of entries in header - read until error
+      while($True){
+        try{
+          $TempObject = @{}
+          $TempObject.Tag          = $BinReader.ReadBytes(4)
+          $null                    = $BinReader.ReadBytes(4)
+          $CacheEntrySize          = $BinReader.ReadUInt32()
+          $NameLength              = $BinReader.ReadUInt16()
+          $TempObject.FullName     = $UnicodeEncoding.GetString($BinReader.ReadBytes($NameLength))
+          $TempObject.Name         = (split-path $TempObject.Name -Leaf).ToUpperInvariant()
+          $TempObject.Path         = (split-path $TempObject.Name).ToUpperInvariant()
+          $TempObject.Time         = [DateTime]::FromFileTime($BinReader.ReadUInt64())
+          $DataLength              = $BinReader.ReadUInt32()
+          $TempObject.Data         = $BinReader.ReadBytes($DataLength)
+          $TempObject.EntryNumber  = $ShimCacheBins.Add($TempObject)
+        }catch [System.IO.EndOfStreamException]{
+          break
+        }catch {
+          $_ | format-list * -force | out-string | write-error
+          break
+        }
+      }
+      break
+    }
+<# These didn't pertain to me, but you do you...
+		0x00000030 { # Windows 10
 			# Finish Reading Header
 			$BinReader.ReadBytes(32) | Out-Null
 			$NumberOfEntries = [System.BitConverter]::ToUInt32($BinReader.ReadBytes(4),0)
@@ -116,8 +156,7 @@ if ($AppCompatCache -ne $null) {
                 write-host "win 10"
 		}
 	
-		# 0x80 - Windows 8
-		"80000000" {
+		0x00000080 { # Windows 8
 			$Offset = [System.BitConverter]::ToUInt32($AppCompatCache[0..3],0)
 			$Tag = [System.BitConverter]::ToString($AppCompatCache[$Offset..($Offset+3)],0) -replace "-",""
 			
@@ -199,8 +238,7 @@ if ($AppCompatCache -ne $null) {
 
 		}
 	
-		# BADC0FEE in Little Endian Hex - Windows 7 / Windows 2008 R2
-		"EE0FDCBA" {
+		0xbadc0fee { # Windows 7 / Windows 2008 R2
 			# Number of Entries at Offset 4, Length of 4 bytes
 			$NumberOfEntries = [System.BitConverter]::ToUInt32($BinReader.ReadBytes(4),0)
 			# Move BinReader to the Offset 128 where the Entries begin
@@ -268,8 +306,7 @@ if ($AppCompatCache -ne $null) {
             write-host "win 7"
 		}
 		
-		# BADC0FFE in Little Endian Hex - Windows XP 64-bit, Windows Server 2003 through Windows Vista and Windows Server 2008
-		"FE0FDCBA" {
+		0xbadc0ffe { # Windows XP 64-bit, Windows Server 2003 through Windows Vista and Windows Server 2008
 		#### THIS AREA NEEDS WORK, TESTING, ETC.
 		
 			# Number of Entries at Offset 4, Length of 4 bytes
@@ -335,8 +372,7 @@ if ($AppCompatCache -ne $null) {
 
 		}
 		
-		# DEADBEEF in Little Endian Hex - Windows XP 32-bit
-		"EFBEADDE" {
+		0xdeadbeef { # Windows XP 32-bit
 			# Number of Entries
 			$NumberOfEntries = [System.BitConverter]::ToUInt32($BinReader.ReadBytes(4),0)
 			# Number of LRU Entries
@@ -368,486 +404,119 @@ if ($AppCompatCache -ne $null) {
 			#return $EntryArray
             write-host "win xp 32 bit"
 		}
+
+#>
+
+    default{throw ('Unknown Application Compatibility Cache header format: 0x{0:x8}' -f $_)}
 	}
-        foreach($Entry in $EntryArray)
-        {
-           $ShimFileName = Split-Path $Entry.Name -leaf
-           $check=""
-           $check64=""           
-           if(($ShimFileName -ne "dismhost.exe") -and ($Entry.Name))
-           {
-           if($64BinsOnly.InputObject -contains $ShimFileName)
-           {
-                [array]$check = $Sys64BinList | where {$_.Name -eq $ShimFileName}
-                
-                if($check.Length -gt 1)
-                {
-                        foreach($bin in $check)
-                        {
-                            [string]$stringpath = $Entry.Name
-                            if (($bin.FullName.ToLower() -ne $stringpath.ToLower()) -and ($stringpath.Length -gt 0))
-                            {
-           
-                                $SusShimCacheObject = New-Object psobject
-                                $SusShimCacheObject | Add-Member -MemberType NoteProperty -Name "ComputerName" -Value $env:COMPUTERNAME
-                                $SusShimCacheObject | Add-Member -MemberType NoteProperty -Name "SusExe" -Value $bin.Name
-                                $SusShimCacheObject | Add-Member -MemberType NoteProperty -Name "WinSysMatch" -Value $check.FullName
-                                $SusShimCacheObject | Add-Member -MemberType NoteProperty -Name "WinSys64Match" -Value $check64.FullName
-                                $SusShimCacheArray += $SusShimCacheObject
-                            }
-                        }
-                 }
-                 if($check.Length -eq 1)
-                 {
-                        
-                        [string]$stringpath = $Entry.Name
-                        if (($check.FullName.ToLower() -ne $stringpath.ToLower()) -and ($stringpath.Length -gt 0))
-                        {
-           
-                            $SusShimCacheObject = New-Object psobject
-                            $SusShimCacheObject | Add-Member -MemberType NoteProperty -Name "ComputerName" -Value $env:COMPUTERNAME
-                            $SusShimCacheObject | Add-Member -MemberType NoteProperty -Name "SusExe" -Value $Entry.Name
-                            $SusShimCacheObject | Add-Member -MemberType NoteProperty -Name "WinSysMatch" -Value $check.FullName
-                            $SusShimCacheObject | Add-Member -MemberType NoteProperty -Name "WinSys64Match" -Value $check64.FullName
-                            $SusShimCacheArray += $SusShimCacheObject
-                        }
-                 }
+  
+  $SysBinNames = ($32BinNames + $64BinNames | sort-object -Unique).where{$_ -ne 'DISMHOST.EXE'}
 
-           }
-           elseif ($Sys32BinList.Name -contains $ShimFileName)
-           {
-                [array]$check = $Sys32BinList | where {$_.Name -eq $ShimFileName}
-                if ($Sys64BinList.Name -contains $ShimFileName)
-                {
-                    [array]$check64 = $Sys64BinList | where {$_.Name -eq $ShimFileName}
-                }
-                
-                if($check.Length -gt 1)
-                {
-                        
-                        foreach($bin in $check)
-                        {
-                            [string]$stringpath = $Entry.Name
-                            if($check64)
-                            {
-
-                               
-                                if (($bin.FullName.ToLower() -ne $stringpath.ToLower()) -and ($stringpath.Length -gt 0) -and ($check64.FullName.ToLower() -ne $stringpath.ToLower()))
-                                {
-                                
-                                    $SusShimCacheObject = New-Object psobject
-                                    $SusShimCacheObject | Add-Member -MemberType NoteProperty -Name "ComputerName" -Value $env:COMPUTERNAME
-                                    $SusShimCacheObject | Add-Member -MemberType NoteProperty -Name "SusExe" -Value $stringpath
-                                    $SusShimCacheObject | Add-Member -MemberType NoteProperty -Name "WinSysMatch" -Value $bin.FullName
-                                    $SusShimCacheObject | Add-Member -MemberType NoteProperty -Name "WinSys64Match" -Value $check64.FullName
-                                    $SusShimCacheArray += $SusShimCacheObject
-
-                                }
-
-
-                            }
-                            elseif (($bin.FullName.ToLower() -ne $stringpath.ToLower()) -and ($stringpath.Length -gt 0))
-                            {
-                                
-                                $SusShimCacheObject = New-Object psobject
-                                $SusShimCacheObject | Add-Member -MemberType NoteProperty -Name "ComputerName" -Value $env:COMPUTERNAME
-                                $SusShimCacheObject | Add-Member -MemberType NoteProperty -Name "SusExe" -Value $stringpath
-                                $SusShimCacheObject | Add-Member -MemberType NoteProperty -Name "WinSysMatch" -Value $bin.FullName
-                                $SusShimCacheArray += $SusShimCacheObject
-                             }
-                        }
-                }
-                if($check.Length -eq 1)
-                {
-                        [string]$stringpath = $Entry.Name
-                        
-                        if($check64)
-                        {
-                                          
-                            if (($check.FullName.ToLower() -ne $stringpath.ToLower()) -and ($stringpath.Length -gt 0) -and ($check64.FullName.ToLower() -ne $stringpath.ToLower()))
-                            {
-                            $SusShimCacheObject = New-Object psobject
-                            $SusShimCacheObject | Add-Member -MemberType NoteProperty -Name "ComputerName" -Value $env:COMPUTERNAME
-                            $SusShimCacheObject | Add-Member -MemberType NoteProperty -Name "SusExe" -Value $stringpath
-                            $SusShimCacheObject | Add-Member -MemberType NoteProperty -Name "WinSysMatch" -Value $check.FullName
-                            $SusShimCacheObject | Add-Member -MemberType NoteProperty -Name "Win64SysMatch" -Value $check64.FullName
-                            $SusShimCacheArray += $SusShimCacheObject
-                            }
-
-                        }
-                        elseif (($check.FullName.ToLower() -ne $stringpath.ToLower()) -and ($stringpath.Length -gt 0))
-                        {
-                            $SusShimCacheObject = New-Object psobject
-                            $SusShimCacheObject | Add-Member -MemberType NoteProperty -Name "ComputerName" -Value $env:COMPUTERNAME
-                            $SusShimCacheObject | Add-Member -MemberType NoteProperty -Name "SusExe" -Value $stringpath
-                            $SusShimCacheObject | Add-Member -MemberType NoteProperty -Name "WinSysMatch" -Value $check.FullName
-                            $SusShimCacheArray += $SusShimCacheObject
-                        }
-                }
-           }
-           }
-        }
-        $SusShimCacheArray | Export-csv -NoTypeInformation $CollectionPath\SuspiciousShimCacheEntries.csv  
-}
-
-
-}
-##End Shimcache Functions
-#endregion
-
-#region Start side load detects
-Function Get-SideLoadDetectsPS45{
-<#
-.DESCRIPTION
-Get-SideLoadDetect 
-  Comparative analysis function designed to identify situations where a 
-  System32/SysWow64 executable is located in a userland directory along with a 
-  DLL that matches a System32/SysWow64 DLL name but is not signed by Microsoft.
-
-.NOTES
-ToDo:
-+ Confirm process accounts for any unsigned system DLL in a user folder
-#>param()
-  $SysBinNames = $32BinNames + $64BinNames | sort-object -Unique
-  $SysDLLNames = $32DLLNames + $64DLLNames | sort-object -Unique
-
-  $UserLandBins.where{$_.Name.ToUpperInvariant() -in $SysBinNames -or $_.OGName.ToUpperInvariant() -in $SysBinNames}.foreach{
-    $uBIN = $_
-    $uDLLs = $InfoByPathByType.($uBIN.Path).dll
-    $uDLLs.where{!$_.SaysMS -and $_.Name.ToUpperInvariant() -in $SysDLLNames}.foreach{
-      $uDLL = $_
-      write-output [PSCustomObject]@{
-        ComputerName = $env:COMPUTERNAME
-        SideLoadExe  = $uBIN.FullName
-        SideLoadExeOriginalFilename = $uBIN.File.VersionInfo.OriginalFileName
-        SideLoadDLL  = $uDLL.FullName
-        DLLHash      = $uDLL.Hash.MD5
-        SigStatus    = $uDLL.Sig.Status
+  $ShimCacheBins.where{$_.Name -ne $null -and $_.Name -in $SysBinNames}.foreach{$shBIN = $_
+    $SysBinPaths = $SysInfoByName.($shBIN.Name).Path.ToUpperInvariant() | sort-object -Unique
+    if($shBIN.Path.ToUpperInvariant() -in $SysBinPaths){continue}
+    
+    $SusShimCacheBin = @{
+      ComputerName  = $env:COMPUTERNAME
+      SusExe        = $shBIN.FullName
+      WinSysMatch   = ''
+      WinSys64Match = ''
+    }
+    $SysInfoByName.($shBIN.Name).foreach{$SysBIN = $_
+      switch($SysBIN.Local){
+       'Sys32'{$SusShimCacheBin.WinSysMatch   = $SysBIN.FullName;break}
+       'Sys64'{$SusShimCacheBin.WinSys64Match = $SysBIN.FullName;break}
       }
     }
-  } | Export-csv -NoTypeInformation $CollectionPath\SideLoadDetections.csv
+    write-output $SusShimCacheBin
+  } | Export-csv -NoTypeInformation $CollectionPath\SuspiciousShimCacheEntries.csv
 }
-#endregion Sideload Detects
+#endregion Shimcache Functions
 
 #region Start Suspicious Bin Audit
-Function Get-SusExecsPS45
-{
-write-host "Analyzing binaries in userland"
-$SusBinListArray = @()
-$ErrorActionPreference = "SilentlyContinue"
-$UserLandBins = Get-ChildItem -Path $env:HOMEDRIVE\Users , $env:HOMEDRIVE\ProgramData, $env:HOMEDRIVE\Intel, $env:HOMEDRIVE\Recovery -Recurse -ErrorAction SilentlyContinue | Where-Object {($_.Extension -like ".exe")} -ErrorAction SilentlyContinue 
-$count = 0
+Function Get-SusExecsPS45{
+<#
+.DESCRIPTION
+Get-SusExec & Get-SusDLLs 
+  Profiles a system to locate System32 and SysWow64 executables and DLL files 
+  that do not exist within their default location.
+#>
+  param(
+    [string]
+    #Specifies the path to the new report file
+    $Destination = (join-path $CollectionPath 'SuspiciousBinsList.csv')
+  )
+  write-host "Analyzing binaries in userland"
 
-#Start Find possible sideloaded exes
-foreach($UserLandBin in $UserLandBins)
-{
-    
-        
-    if($UserLandBin.VersionInfo.OriginalFileName)
-    {
-        [string]$UserLandExeOGName = $UserLandBin.VersionInfo.OriginalFileName.replace(".MUI","")
+  #Start Find possible sideloaded exes
+  $UserLandBins.where{$_.Name.ToUpperInvariant() -in $SysBinNames}.foreach{
+    $uBIN  = $_
+    $MatchingSysBins = $SysInfoByName.($uBIN.Name) | sort-object -Unique -Property Path
+    $MatchingSysBins.foreach{
+      $SysBIN = $_
+      write-output ([PSCustomObject]@{
+        ComputerName = $env:COMPUTERNAME
+        SusExe       = $uBIN.FullName
+        SusExeOGName = $uBIN.VersionInfo.OriginalFileName
+        SusExeHash   = $uBIN.Hash.MD5
+        WinSysMatch  = $SysBIN.FullName
+        WinSysHash   = $SysBIN.Hash.MD5
+        MatchedOnOGName = 'No'
+      })
     }
-    if(($64BinsOnly.InputObject -contains $UserLandExeOGName) -or ($64BinsOnly.InputObject -contains $UserLandBin.Name))
-    {
-       if ($Sys64BinList.Name -contains $UserLandExeOGName)
-       {
-            [array]$check = $Sys64BinList | where {$_.Name -eq $UserLandBin.VersionInfo.OriginalFileName}
-       }
-       else
-       {
-            [array]$check = $Sys64BinList | where {$_.Name -eq $UserLandBin.Name}
-       }
-              if($check.Length -gt 1)
-       {
-            foreach($bin in $check)
-            {
-                [string]$stringpath = $UserLandBin.FullName
-                if (($bin.FullName.ToLower() -ne $stringpath.ToLower()) -and ($stringpath.Length -gt 0))
-                {
-           
-                    if ($PSVersionTable.PSVersion.Major -lt 4)
-                    {
-                        $UserLandHash = Get-Hash -Algorithm MD5 -FilePath $bin.FullName -ErrorAction SilentlyContinue
-                        $Sys64BinHash = Get-Hash -Algorithm MD5 -FilePath $check.FullName -ErrorAction SilentlyContinue
-                    }
-                    else
-                    { 
-                        $UserLandHash = Get-FileHash -Algorithm MD5 $bin.FullName -ErrorAction SilentlyContinue
-                        $Sys64BinHash = Get-FileHash -Algorithm MD5 $check.FullName -ErrorAction SilentlyContinue
-                    }
-                    $SusBinListObject = New-Object psobject
-                    $SusBinListObject | Add-Member -MemberType NoteProperty -Name "ComputerName" -Value $env:COMPUTERNAME
-                    $SusBinListObject | Add-Member -MemberType NoteProperty -Name "SusExe" -Value $bin.FullName
-                    $SusBinListObject | Add-Member -MemberType NoteProperty -Name "SusExeOGName" -Value $bin.VersionInfo.OriginalFileName
-                    $SusBinListObject | Add-Member -MemberType NoteProperty -Name "SusExeHash" -Value $UserLandHash.Hash
-                    $SusBinListObject | Add-Member -MemberType NoteProperty -Name "WinSysMatch" -Value $check.FullName
-                    $SusBinListObject | Add-Member -MemberType NoteProperty -Name "WinSysHash" -Value $Sys64BinHash.Hash
-                    $SusBinListArray += $SusBinListObject
-                }
-            }
-       }
-       if($check.Length -eq 1)
-       {
-            [string]$stringpath = $UserLandBin.FullName
-            if (($check.FullName.ToLower() -ne $stringpath.ToLower()) -and ($stringpath.Length -gt 0))
-            {
-           
-                    if ($PSVersionTable.PSVersion.Major -lt 4)
-                    {
-                        $UserLandHash = Get-Hash -Algorithm MD5 -FilePath $UserLandBin.FullName -ErrorAction SilentlyContinue
-                        $Sys64BinHash = Get-Hash -Algorithm MD5 -FilePath $check.FullName -ErrorAction SilentlyContinue
-                    }
-                    else
-                    {
-                        $UserLandHash = Get-FileHash -Algorithm MD5 $UserLandBin.FullName -ErrorAction SilentlyContinue
-                        $Sys64BinHash = Get-FileHash -Algorithm MD5 $check.FullName -ErrorAction SilentlyContinue
-                    }
-            $SusBinListObject = New-Object psobject
-            $SusBinListObject | Add-Member -MemberType NoteProperty -Name "ComputerName" -Value $env:COMPUTERNAME
-            $SusBinListObject | Add-Member -MemberType NoteProperty -Name "SusExe" -Value $UserLandBin.FullName
-            $SusBinListObject | Add-Member -MemberType NoteProperty -Name "SusExeOGName" -Value $UserLandBin.VersionInfo.OriginalFileName
-            $SusBinListObject | Add-Member -MemberType NoteProperty -Name "SusExeHash" -Value $UserLandHash.Hash
-            $SusBinListObject | Add-Member -MemberType NoteProperty -Name "WinSysMatch" -Value $check.FullName
-            $SusBinListObject | Add-Member -MemberType NoteProperty -Name "WinSysHash" -Value $Sys64BinHash.Hash
-            $SusBinListArray += $SusBinListObject
-            }
-       }
-    }
-    elseif (($Sys32BinList.Name -contains $UserLandExeOGName) -or ($Sys32BinList.Name -contains $UserLandBin.Name))
-    {
-       if ($Sys32BinList.Name -contains $UserLandBin.VersionInfo.OriginalFileName)
-       {
-            [array]$check = $Sys32BinList | where {$_.Name -eq $UserLandExeOGName }
-       }
-       else
-       {
-            [array]$check = $Sys32BinList | where {$_.Name -eq $UserLandBin.Name}
-       }
-       if($check.Length -gt 1)
-       {
-            foreach($bin in $check)
-            {
-                [string]$stringpath = $UserLandBin.FullName
-                if (($bin.FullName.ToLower() -ne $stringpath.ToLower()) -and ($stringpath.Length -gt 0))
-                {
-           
-                    if ($PSVersionTable.PSVersion.Major -lt 4)
-                    {
-                        $UserLandHash = Get-Hash -Algorithm MD5 -FilePath $bin.FullName -ErrorAction SilentlyContinue
-                        $Sys64BinHash = Get-Hash -Algorithm MD5 -FilePath $check.FullName -ErrorAction SilentlyContinue
-                    }
-                    else
-                    {
-                        $UserLandHash = Get-FileHash -Algorithm MD5 $bin.FullName -ErrorAction SilentlyContinue
-                        $Sys64BinHash = Get-FileHash -Algorithm MD5 $check.FullName -ErrorAction SilentlyContinue
-                    }
-                    $SusBinListObject = New-Object psobject
-                    $SusBinListObject | Add-Member -MemberType NoteProperty -Name "ComputerName" -Value $env:COMPUTERNAME
-                    $SusBinListObject | Add-Member -MemberType NoteProperty -Name "SusExe" -Value $bin.FullName
-                    $SusBinListObject | Add-Member -MemberType NoteProperty -Name "SusExeOGName" -Value $bin.VersionInfo.OriginalFileName
-                    $SusBinListObject | Add-Member -MemberType NoteProperty -Name "SusExeHash" -Value $UserLandHash.Hash
-                    $SusBinListObject | Add-Member -MemberType NoteProperty -Name "WinSysMatch" -Value $check.FullName
-                    $SusBinListObject | Add-Member -MemberType NoteProperty -Name "WinSysHash" -Value $Sys32BinHash.Hash
-                    $SusBinListArray += $SusBinListObject
-                }
-            }
-       }
-       if($check.Length -eq 1)
-       {
-            [string]$stringpath = $UserLandBin.FullName
-            if (($check.FullName.ToLower() -ne $stringpath.ToLower()) -and ($stringpath.Length -gt 0))
-            {
-           
-                    if ($PSVersionTable.PSVersion.Major -lt 4)
-                    {
-                        $UserLandHash = Get-Hash -Algorithm MD5 -FilePath $UserLandBin.FullName -ErrorAction SilentlyContinue
-                        $Sys64BinHash = Get-Hash -Algorithm MD5 -FilePath $check.FullName -ErrorAction SilentlyContinue
-                    }
-                    else
-                    {
-                        $UserLandHash = Get-FileHash -Algorithm MD5 $UserLandBin.FullName -ErrorAction SilentlyContinue
-                        $Sys64BinHash = Get-FileHash -Algorithm MD5 $check.FullName -ErrorAction SilentlyContinue
-                    }
-            $SusBinListObject = New-Object psobject
-            $SusBinListObject | Add-Member -MemberType NoteProperty -Name "ComputerName" -Value $env:COMPUTERNAME
-            $SusBinListObject | Add-Member -MemberType NoteProperty -Name "SusExe" -Value $UserLandBin.FullName
-            $SusBinListObject | Add-Member -MemberType NoteProperty -Name "SusExeOGName" -Value $UserLandBin.VersionInfo.OriginalFileName
-            $SusBinListObject | Add-Member -MemberType NoteProperty -Name "SusExeHash" -Value $UserLandHash.Hash
-            $SusBinListObject | Add-Member -MemberType NoteProperty -Name "WinSysMatch" -Value $check.FullName
-            $SusBinListObject | Add-Member -MemberType NoteProperty -Name "WinSysHash" -Value $Sys32BinHash.Hash
-            $SusBinListArray += $SusBinListObject
-            }
-       }
-       
-       
-    }
+  } | Export-csv -NoTypeInformation $Destination
 
-    
-    
-
+  $UserLandBins.where{$_.OGName -ne $null -and $_.Name.ToUpperInvariant() -ne $_.OGName.ToUpperInvariant() -and $_.OGName.ToUpperInvariant() -in $SysBinNames}.foreach{
+    $uBIN = $_
+    $MatchingSysBins = $SysInfoByName.($uBIN.OGName) | sort-object -Unique -Property Path
+    $MatchingSysBins.foreach{
+      $SysBIN = $_
+      write-output ([PSCustomObject]@{
+        ComputerName = $env:COMPUTERNAME
+        SusExe       = $uBIN.FullName
+        SusExeOGName = $uBIN.VersionInfo.OriginalFileName
+        SusExeHash   = $uBIN.Hash.MD5
+        WinSysMatch  = $SysBIN.FullName
+        WinSysHash   = $SysBIN.Hash.MD5
+        MatchedOnOGName = 'Yes'
+      })
+    }
+  } | Export-csv -NoTypeInformation $Destination -Append
 }
-
-
-$SusBinListArray | Export-csv -NoTypeInformation $CollectionPath\SuspiciousBinsList.csv
-
-# End of PRocess Dump
-}
-## End Suspicious Bin Audit
-#endregion
+#endregion Suspicious Bin Audit
 
 #region Start Suspicious DLL Audit
-Function Get-SusDllsPS45
-{
-write-host "Analyzing DLLs in userland"
-$SusDLLListArray = @()
-$ErrorActionPreference = "SilentlyContinue"
-$count = 0
+Function Get-SusDllsPS45{
+<#
+.DESCRIPTION
+Get-SusExec & Get-SusDLLs 
+  Profiles a system to locate System32 and SysWow64 executables and DLL files 
+  that do not exist within their default location.
+#>
+  param(
+    [string]
+    #Specifies the path to the new report file
+    $Destination = (join-path $CollectionPath 'SuspiciousDllsList.csv')
+  )
+  write-host "Analyzing DLLs in userland"
 
-#Start Find possible sideloaded DLLs
-foreach($UserLandDll in $UserLandDLLs)
-{
-
-    if($64DllsOnly.InputObject -contains $UserLandDll.Name)
-    {
-      $DllSigResult = Get-AuthenticodeSignature $UserLandDll.FullName -ErrorAction Ignore
-      $CertSubject = Get-AuthenticodeSignature $UserLandDll.FullName | Select-Object -Property @{Name='Subject';Expression={($_.SignerCertificate.Subject)}}
-      $MSSubject = "CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
-      if ($CertSubject.Subject -ne $MSSubject)
-      { 
-        [array]$check = $Sys64DLLList | where {$_.Name -eq $UserLandDll.Name}
-        if($check.Length -gt 1)
-        {
-            foreach($bin in $check)
-            {
-                [string]$stringpath = $UserLandDll.FullName
-                if (($bin.FullName.ToLower() -ne $stringpath.ToLower()) -and ($stringpath.Length -gt 0))
-                {
-           
-                    if ($PSVersionTable.PSVersion.Major -lt 4)
-                    {
-                        $UserLandHash = Get-Hash -Algorithm MD5 -FilePath $stringpath -ErrorAction SilentlyContinue
-                        $Sys64DllHash = Get-Hash -Algorithm MD5 -FilePath $bin.FullName -ErrorAction SilentlyContinue
-                    }
-                    else
-                    {
-                        $UserLandHash = Get-FileHash -Algorithm MD5 $stringpath -ErrorAction SilentlyContinue
-                        $Sys64DllHash = Get-FileHash -Algorithm MD5 $bin.FullName -ErrorAction SilentlyContinue
-                    }
-                    $SusDLLListObject = New-Object psobject
-                    $SusDLLListObject | Add-Member -MemberType NoteProperty -Name "ComputerName" -Value $env:COMPUTERNAME
-                    $SusDLLListObject | Add-Member -MemberType NoteProperty -Name "SusDll" -Value $stringpath
-                    $SusDLLListObject | Add-Member -MemberType NoteProperty -Name "SusDllHash" -Value $UserLandHash.Hash
-                    $SusDLLListObject | Add-Member -MemberType NoteProperty -Name "WinSysMatch" -Value $bin.FullName
-                    $SusDLLListObject | Add-Member -MemberType NoteProperty -Name "WinSysHash" -Value $Sys64DllHash.Hash
-                    $SusDLLListArray += $SusDLLListObject
-                }
-            }
-       }
-        if($check.Length -eq 1)
-        {
-            [string]$stringpath = $UserLandDll.FullName
-            if (($check.FullName.ToLower() -ne $stringpath.ToLower()) -and ($stringpath.Length -gt 0))
-            {
-           
-                    if ($PSVersionTable.PSVersion.Major -lt 4)
-                    {
-                        $UserLandHash = Get-Hash -Algorithm MD5 -FilePath $UserLandDll.FullName -ErrorAction SilentlyContinue
-                        $Sys64DllHash = Get-Hash -Algorithm MD5 -FilePath $check.FullName -ErrorAction SilentlyContinue
-                    }
-                    else
-                    { 
-                        $UserLandHash = Get-FileHash -Algorithm MD5 $UserLandDll.FullName -ErrorAction SilentlyContinue
-                        $Sys64DllHash = Get-FileHash -Algorithm MD5 $check.FullName -ErrorAction SilentlyContinue
-                    }
-            $SusDLLListObject = New-Object psobject
-            $SusDLLListObject | Add-Member -MemberType NoteProperty -Name "ComputerName" -Value $env:COMPUTERNAME
-            $SusDLLListObject | Add-Member -MemberType NoteProperty -Name "ComputerName" -Value $env:COMPUTERNAME
-            $SusDLLListObject | Add-Member -MemberType NoteProperty -Name "SusDll" -Value $bin.FullName
-            $SusDLLListObject | Add-Member -MemberType NoteProperty -Name "SusDllHash" -Value $UserLandHash.Hash
-            $SusDLLListObject | Add-Member -MemberType NoteProperty -Name "WinSysMatch" -Value $check.FullName
-            $SusDLLListObject | Add-Member -MemberType NoteProperty -Name "WinSysHash" -Value $Sys64DllHash.Hash
-            $SusDLLListArray += $SusDLLListObject
-            }
-       }
-      }
+  #Start Find possible sideloaded DLLs
+  $UserLandDLLs.where{$_.Name.ToUpperInvariant() -in $SysDLLNames -and !$_.SaysMS}.foreach{
+    $uDLL = $_
+    $MatchingSysDLLs = $SysInfoByName.($uDLL.Name) | sort-object -Unique -Property Path
+    $MatchingSysDLLs.foreach{
+      $SysDLL = $_
+      write-output ([PSCustomObject]@{
+        ComputerName = $env:COMPUTERNAME
+        SusDll       = $uDLL.FullName
+        SusDllHash   = $uDLL.Hash.MD5
+        WinSysMatch  = $SysDLL.FullName
+        WinSysHash   = $SysDLL.Hash.MD5
+      })
     }
-    elseif ($Sys32DLLList.Name -contains $UserLandDll.Name)
-    {
-       $DllSigResult = Get-AuthenticodeSignature $UserLandDll.FullName -ErrorAction Ignore
-       $CertSubject = Get-AuthenticodeSignature $UserLandDll.FullName | Select-Object -Property @{Name='Subject';Expression={($_.SignerCertificate.Subject)}}
-      $MSSubject = "CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
-      if ($CertSubject.Subject -ne $MSSubject)
-      {      
-        [array]$check = $Sys32DLLList | where {$_.Name -eq $UserLandDll.Name}
-       
-        if($check.Length -gt 1)
-        {
-            foreach($bin in $check)
-            {
-                [string]$stringpath = $UserLandDll.FullName
-                if (($bin.FullName.ToLower() -ne $stringpath.ToLower()) -and ($stringpath.Length -gt 0))
-                {
-           
-                    if ($PSVersionTable.PSVersion.Major -lt 4)
-                    { 
-                        $UserLandHash = Get-Hash -Algorithm MD5 -FilePath $stringpath -ErrorAction SilentlyContinue
-                        $Sys64DllHash = Get-Hash -Algorithm MD5 -FilePath $check.FullName -ErrorAction SilentlyContinue
-                    }
-                    else
-                    {
-                        $UserLandHash = Get-FileHash -Algorithm MD5 $stringpath -ErrorAction SilentlyContinue
-                        $Sys64DllHash = Get-FileHash -Algorithm MD5 $check.FullName -ErrorAction SilentlyContinue
-                    }
-                    $SusDLLListObject = New-Object psobject
-                    $SusDLLListObject | Add-Member -MemberType NoteProperty -Name "ComputerName" -Value $env:COMPUTERNAME
-                    $SusDLLListObject | Add-Member -MemberType NoteProperty -Name "SusDll" -Value $stringpath
-                    $SusDLLListObject | Add-Member -MemberType NoteProperty -Name "SusDllHash" -Value $UserLandHash.Hash
-                    $SusDLLListObject | Add-Member -MemberType NoteProperty -Name "WinSysMatch" -Value $bin.FullName
-                    $SusDLLListObject | Add-Member -MemberType NoteProperty -Name "WinSysHash" -Value $Sys32DllHash.Hash
-                    $SusDLLListArray += $SusDLLListObject
-                }
-            }
-       }
-        if($check.Length -eq 1)
-        {
-            [string]$stringpath = $UserLandDll.FullName
-            if (($check.FullName.ToLower() -ne $stringpath.ToLower()) -and ($stringpath.Length -gt 0))
-            {
-           
-                    if ($PSVersionTable.PSVersion.Major -lt 4)
-                    {
-                        $UserLandHash = Get-Hash -Algorithm MD5 -FilePath $UserLandDll.FullName -ErrorAction SilentlyContinue
-                        $Sys64DllHash = Get-Hash -Algorithm MD5 -FilePath $check.FullName -ErrorAction SilentlyContinue
-                    }
-                    else
-                    {
-                        $UserLandHash = Get-FileHash -Algorithm MD5 $UserLandDll.FullName -ErrorAction SilentlyContinue
-                        $Sys64DllHash = Get-FileHash -Algorithm MD5 $check.FullName -ErrorAction SilentlyContinue
-                    }
-            $SusDLLListObject = New-Object psobject
-            $SusDLLListObject | Add-Member -MemberType NoteProperty -Name "ComputerName" -Value $env:COMPUTERNAME
-            $SusDLLListObject | Add-Member -MemberType NoteProperty -Name "SusDll" -Value $UserLandDll.FullName
-            $SusDLLListObject | Add-Member -MemberType NoteProperty -Name "SusDllHash" -Value $UserLandHash.Hash
-            $SusDLLListObject | Add-Member -MemberType NoteProperty -Name "WinSysMatch" -Value $check.FullName
-            $SusDLLListObject | Add-Member -MemberType NoteProperty -Name "WinSysHash" -Value $Sys32BinHash.Hash
-            $SusDLLListArray += $SusDLLListObject
-            }
-       }
-      }
-       
-    }
-
-    
-    
-
+  } | Export-csv -NoTypeInformation $Destination
 }
-
-
-$SusDLLListArray | Export-csv -NoTypeInformation $CollectionPath\SuspiciousDllsList.csv
-
-}
-## End suspicious DLL Audit
-#endregion
+#endregion suspicious DLL Audit
 
 $ErrorActionPreference = "Continue"
 
@@ -855,7 +524,7 @@ $ErrorActionPreference = "Continue"
 set-variable -Option ReadOnly -Name MSSubject -Value 'CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
 set-variable -Option ReadOnly -Name System32  -Value "$env:SystemRoot\System32\"
 set-variable -Option ReadOnly -Name SysWOW64  -Value "$env:SystemRoot\SysWOW64\"
-$FullList = new-object System.Collections.ArrayList
+$FullList     = new-object System.Collections.ArrayList
 $MagicErrors  = new-object System.Collections.ArrayList
 
 $Sys32BinList = new-object System.Collections.ArrayList
@@ -865,9 +534,11 @@ $Sys32DLLList = new-object System.Collections.ArrayList
 $Sys64DLLList = new-object System.Collections.ArrayList
 $UserLandDLLs = new-object System.Collections.ArrayList
 $InfoByPathByType = @{}
+$SysInfoByName    = @{}
 
 $FileCount = 0
-filter ProcessFile{ $file = $_
+filter ProcessFile{
+  $file = $_
   try{$PE_Magic = get-content $file -TotalCount 2 -Encoding Byte -ErrorAction Ignore}catch {
     $PE_Magic = new-object byte[] 2
     if($file.FullName -match '[[\]]'){
@@ -899,22 +570,33 @@ filter ProcessFile{ $file = $_
       }
       fType    = $file.Extension.Substring(1).ToLowerInvariant()
       isMagic  = $isMagic
-      Hash     = HashThis (get-content $file -Raw -Encoding Byte -ErrorAction Ignore)
-      Sig      = Get-AuthenticodeSignature $file -ErrorAction Ignore
+      Hash     = (HashThis ([System.IO.File]::ReadAllBytes($file.FullName)))
+      Sig      = (Get-AuthenticodeSignature $file -ErrorAction Ignore)
     }
     $info.SaysMS = $info.Sig.SignerCertificate.Subject -eq $MSSubject
     if($info.OGName -ne $null)
       {$info.OGName = $info.OGName.Replace('.MUI','')}
     
     switch($info.Local){
-      'Sys32'
-        {if($info.fType -eq 'dll'){$null=$Sys32DLLList.Add($info)}else{$null=$Sys32BinList.Add($info)};break;}
-      'Sys64'
-        {if($info.fType -eq 'dll'){$null=$Sys64DLLList.Add($info)}else{$null=$Sys64BinList.Add($info)};break;}
-      'UserLand'
-        {if($info.fType -eq 'dll'){$null=$UserLandDLLs.Add($info)}else{$null=$UserLandBins.Add($info)};break;}
+      'Sys32'{
+        if($info.fType -eq 'dll'){$null=$Sys32DLLList.Add($info)}else{$null=$Sys32BinList.Add($info)};
+        OrganizeThis $SysInfoByName $info.Name.ToUpperInvariant() $info
+        break;
+      }
+      'Sys64'{
+        if($info.fType -eq 'dll'){$null=$Sys64DLLList.Add($info)}else{$null=$Sys64BinList.Add($info)};
+        OrganizeThis $SysInfoByName $info.Name.ToUpperInvariant() $info
+        break;
+      }
+      'UserLand'{
+        if($info.fType -eq 'dll'){$null=$UserLandDLLs.Add($info)}else{$null=$UserLandBins.Add($info)};
+        break;
+      }
     }
 
+    OrganizeThis $InfoByPathByType $iPath,$iType $info
+    
+<# dep use: OrganizeThis
     $iPath = $info.Path; $iType = $info.fType
     if($InfoByPathByType.$iPath -eq $null){
       $InfoByPathByType.$iPath = @{$iType = new-object System.Collections.ArrayList}
@@ -922,6 +604,7 @@ filter ProcessFile{ $file = $_
       $InfoByPathByType.$iPath.$iType = new-object System.Collections.ArrayList
     }
     $null=$InfoByPathByType.$iPath.$iType.Add($info)
+#>
 
     $null=$FullList.Add($info)
   }
@@ -938,32 +621,26 @@ filter ProcessFile{ $file = $_
   "$env:HOMEDRIVE\Recovery"
 ) | get-childitem -File -Force -Recurse -ErrorAction Ignore | ProcessFile
 
-$32BinNames = $Sys32BinList.Name.ToUpperInvariant() | sort-object -Unique
-$64BinNames = $Sys64BinList.Name.ToUpperInvariant() | sort-object -Unique
-$32DLLNames = $Sys32DLLList.Name.ToUpperInvariant() | sort-object -Unique
-$64DLLNames = $Sys64DLLList.Name.ToUpperInvariant() | sort-object -Unique
+$32BinNames  = $Sys32BinList.Name.ToUpperInvariant() | sort-object -Unique
+$64BinNames  = $Sys64BinList.Name.ToUpperInvariant() | sort-object -Unique
+$SysBinNames = $32BinNames + $64BinNames | sort-object -Unique
+$32DLLNames  = $Sys32DLLList.Name.ToUpperInvariant() | sort-object -Unique
+$64DLLNames  = $Sys64DLLList.Name.ToUpperInvariant() | sort-object -Unique
+$SysDLLNames = $32DLLNames + $64DLLNames | sort-object -Unique
 
 $64BinsOnly = new-object System.Collections.ArrayList
 $Sys64BinList.where{$_.Name.ToUpperInvariant() -NotIn $32BinNames}.foreach{$null = $64BinsOnly.Add($_)}
 
 $64DllsOnly = new-object System.Collections.ArrayList
-$Sys64DLLList.where{$_.Name.ToUpperInvariant() -NotIn $32DLLNames}.foreach{$null = $64DLLOnly.Add($_)}
+$Sys64DLLList.where{$_.Name.ToUpperInvariant() -NotIn $64DLLNames}.foreach{$null = $64DLLOnly.Add($_)}
 #endregion
 
-<#
-$Sys32BinList = Get-ChildItem $env:SystemRoot\system32\ -Recurse -ErrorAction SilentlyContinue | Where-Object {($_.Extension -like ".exe")} -ErrorAction SilentlyContinue | Select Name, FullName
-$Sys64BinList = Get-ChildItem $env:SystemRoot\syswow64\ -Recurse -ErrorAction SilentlyContinue | Where-Object {($_.Extension -like ".exe")} -ErrorAction SilentlyContinue | Select Name, FullName
-$64BinsOnly = Compare-Object -ReferenceObject $Sys64BinList.Name -DifferenceObject $Sys32BinList.Name | Where-Object SideIndicator -eq '<=' | Select InputObject
-$UserLandBins = Get-ChildItem -Path $env:HOMEDRIVE\Users , $env:HOMEDRIVE\ProgramData, $env:HOMEDRIVE\Intel, $env:HOMEDRIVE\Recovery -Force -Recurse -ErrorAction SilentlyContinue | Where-Object {($_.Extension -like ".exe")} -ErrorAction SilentlyContinue 
-$Sys32DLLList = Get-ChildItem $env:SystemRoot\system32\ -Recurse -ErrorAction SilentlyContinue | Where-Object {($_.Extension -like ".dll")} -ErrorAction SilentlyContinue | Select Name, FullName
-$Sys64DLLList = Get-ChildItem $env:SystemRoot\syswow64\ -Recurse -ErrorAction SilentlyContinue | Where-Object {($_.Extension -like ".dll")} -ErrorAction SilentlyContinue | Select Name, FullName
-$UserLandDLLs = Get-ChildItem -Path $env:HOMEDRIVE\Users , $env:HOMEDRIVE\ProgramData, $env:HOMEDRIVE\Intel, $env:HOMEDRIVE\Recovery -Force -Recurse -ErrorAction SilentlyContinue | Where-Object {($_.Extension -like ".dll")} -ErrorAction SilentlyContinue
-$64DllsOnly = Compare-Object -ReferenceObject $Sys64DLLList.Name -DifferenceObject $Sys32DLLList.Name | Where-Object SideIndicator -eq '<=' | Select InputObject
-#>
+#region Run Audit Functions
 Get-SideLoadDetectsPS45
 Get-SusShimCachePS45
 Get-SusExecsPS45
 Get-SusDllsPS45
+#endregion
 
 <#
 $bySig = @{}
