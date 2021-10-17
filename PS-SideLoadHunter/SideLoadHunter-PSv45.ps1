@@ -50,46 +50,38 @@ Get-SusShimcache
   SysWow64 executables have executed from a non-standard location.
 #>
   param(
-    [Parameter(Mandatory = $true, ParameterSetName = 'Path')]
     [string]
     #Use this parameter to run against a .reg file export of the Shim Cache.
-    $Path
+    $Path = ''
   )
 
   ## Importing Helper Functions from PS-DigitalForensics https://github.com/davidhowell-tx/PS-DigitalForensics Credit: David Howell ##
   write-host "Analyzing Program Execution Evidence"
   # Initialize Array to store our data
-  $ShimCacheBins  = new-object System.Collections.ArrayList
   $AppCompatCache = $Null
 
-  switch($PSCmdlet.ParameterSetName) {
-    "Path" {
-      if (Test-Path -Path $Path) {
-        # Get the Content of the .reg file, only return lines with Hexadecimal values on them, and remove the backslashes, spaces, and wording at the start
-        $hex = (get-content -Path $Path -raw) -replace '(.|\s)*?"AppCompatCache"=hex:([^"]*)(.|\s)*','$2' -replace '[^0-9a-f]',''
-        $AppCompatCache = new-object byte[] ($hex.Length/2)
-        for($i=0;$i -lt $hex.Length;$i+=2){
-          $AppCompatCache[$i/2] = [System.Convert]::ToByte($hex.Substring($i,2),16)
-        }
-      }
+  if($Path -ne '' -and (test-path $path -type leaf)){
+    # Get the Content of the .reg file, only return lines with Hexadecimal values on them, and remove the backslashes, spaces, and wording at the start
+    $hex = (get-content -Path $Path -raw) -replace '(.|\s)*?"AppCompatCache"=hex:([^"]*)(.|\s)*','$2' -replace '[^0-9a-f]',''
+    $AppCompatCache = new-object byte[] ($hex.Length/2)
+    for($i=0;$i -lt $hex.Length;$i+=2){
+      $AppCompatCache[$i/2] = [System.Convert]::ToByte($hex.Substring($i,2),16)
     }
-    
-    Default {
-      if (!(Get-PSDrive -Name HKLM -PSProvider Registry)) {
-        New-PSDrive -Name HKLM -PSProvider Registry -Root HKEY_LOCAL_MACHINE
-      }
-      # This command gets the current AppCompat Cache, and returns it in a Byte Array.
-      push-location 'HKLM:\System\CurrentControlSet\Control\Session Manager'
-      if(test-path '.\AppCompatCache'){
-        # This is the Windows 2003 and later location of AppCompatCache in the registry
-        $AppCompatCache = (Get-ItemProperty '.\AppCompatCache').AppCompatCache
-      }elseif(test-path '.\AppCompatibility\AppCompatCache'){
-        # If the normal area is not available, try the Windows XP location.
-        # Note, this piece is untested as I don't have a Windows XP system to work with.
-        $AppCompatCache = (Get-ItemProperty '.\AppCompatibility\AppCompatCache').AppCompatCache
-      }
-      pop-location
+  }else{  
+    if (!(Get-PSDrive -Name HKLM -PSProvider Registry)) {
+      New-PSDrive -Name HKLM -PSProvider Registry -Root HKEY_LOCAL_MACHINE
     }
+    # This command gets the current AppCompat Cache, and returns it in a Byte Array.
+    push-location 'HKLM:\System\CurrentControlSet\Control\Session Manager'
+    if(test-path '.\AppCompatCache'){
+      # This is the Windows 2003 and later location of AppCompatCache in the registry
+      $AppCompatCache = (Get-ItemProperty '.\AppCompatCache').AppCompatCache
+    }elseif(test-path '.\AppCompatibility\AppCompatCache'){
+      # If the normal area is not available, try the Windows XP location.
+      # Note, this piece is untested as I don't have a Windows XP system to work with.
+      $AppCompatCache = (Get-ItemProperty '.\AppCompatibility\AppCompatCache').AppCompatCache
+    }
+    pop-location
   }
 
   if($AppCompatCache.Count -le 0){return}
@@ -116,8 +108,8 @@ Get-SusShimcache
           $CacheEntrySize          = $BinReader.ReadUInt32()
           $NameLength              = $BinReader.ReadUInt16()
           $TempObject.FullName     = $UnicodeEncoding.GetString($BinReader.ReadBytes($NameLength))
-          $TempObject.Name         = (split-path $TempObject.Name -Leaf).ToUpperInvariant()
-          $TempObject.Path         = (split-path $TempObject.Name).ToUpperInvariant()
+          $TempObject.Name         = (split-path $TempObject.FullName -Leaf).ToUpperInvariant()
+          $TempObject.Path         = (split-path $TempObject.FullName).ToUpperInvariant()
           $TempObject.Time         = [DateTime]::FromFileTime($BinReader.ReadUInt64())
           $DataLength              = $BinReader.ReadUInt32()
           $TempObject.Data         = $BinReader.ReadBytes($DataLength)
@@ -410,8 +402,6 @@ Get-SusShimcache
     default{throw ('Unknown Application Compatibility Cache header format: 0x{0:x8}' -f $_)}
 	}
   
-  $SysBinNames = ($32BinNames + $64BinNames | sort-object -Unique).where{$_ -ne 'DISMHOST.EXE'}
-
   $ShimCacheBins.where{$_.Name -ne $null -and $_.Name -in $SysBinNames}.foreach{$shBIN = $_
     $SysBinPaths = $SysInfoByName.($shBIN.Name).Path.ToUpperInvariant() | sort-object -Unique
     if($shBIN.Path.ToUpperInvariant() -in $SysBinPaths){continue}
@@ -524,25 +514,27 @@ $ErrorActionPreference = "Continue"
 set-variable -Option ReadOnly -Name MSSubject -Value 'CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
 set-variable -Option ReadOnly -Name System32  -Value "$env:SystemRoot\System32\"
 set-variable -Option ReadOnly -Name SysWOW64  -Value "$env:SystemRoot\SysWOW64\"
-$FullList     = new-object System.Collections.ArrayList
-$MagicErrors  = new-object System.Collections.ArrayList
+$FullList      = new-object System.Collections.ArrayList
+$MagicErrors   = new-object System.Collections.ArrayList
 
-$Sys32BinList = new-object System.Collections.ArrayList
-$Sys64BinList = new-object System.Collections.ArrayList
-$UserLandBins = new-object System.Collections.ArrayList
-$Sys32DLLList = new-object System.Collections.ArrayList
-$Sys64DLLList = new-object System.Collections.ArrayList
-$UserLandDLLs = new-object System.Collections.ArrayList
+$Sys32BinList  = new-object System.Collections.ArrayList
+$Sys64BinList  = new-object System.Collections.ArrayList
+$UserLandBins  = new-object System.Collections.ArrayList
+$Sys32DLLList  = new-object System.Collections.ArrayList
+$Sys64DLLList  = new-object System.Collections.ArrayList
+$UserLandDLLs  = new-object System.Collections.ArrayList
+
+$ShimCacheBins = new-object System.Collections.ArrayList
 $InfoByPathByType = @{}
 $SysInfoByName    = @{}
 
 $FileCount = 0
 filter ProcessFile{
   $file = $_
-  try{$PE_Magic = get-content $file -TotalCount 2 -Encoding Byte -ErrorAction Ignore}catch {
+  try{$PE_Magic = get-content $file -TotalCount 2 -Encoding Byte -ErrorAction Stop}catch {
     $PE_Magic = new-object byte[] 2
     if($file.FullName -match '[[\]]'){
-      #get-content has a known bug with square brackets
+      #get-content has a known bug with square bracket file names
       try{
         $r = $file.OpenRead()
         $null = $r.Read($PE_Magic,0,2)
@@ -557,6 +549,11 @@ filter ProcessFile{
   }
   $isMagic = $PE_Magic.Length -eq 2 -and $PE_Magic[0] -eq 0x4D -and $PE_Magic[1] -eq 0x5A
   if($isMagic -or $File.Extension -in '.exe','.dll','.sys','.com','.scr'){
+    try{$fData = ([System.IO.File]::ReadAllBytes($file.FullName))}catch {
+      write-automated "Read Error: $($file.FullName)"
+      $_ | format-list * -force | out-string | write-automated
+      $fData = [byte[]]@()
+    }
     $info = @{
       Name     = $file.Name
       OGName   = $file.VersionInfo.OriginalFileName
@@ -570,7 +567,7 @@ filter ProcessFile{
       }
       fType    = $file.Extension.Substring(1).ToLowerInvariant()
       isMagic  = $isMagic
-      Hash     = (HashThis ([System.IO.File]::ReadAllBytes($file.FullName)))
+      Hash     = (HashThis $fData)
       Sig      = (Get-AuthenticodeSignature $file -ErrorAction Ignore)
     }
     $info.SaysMS = $info.Sig.SignerCertificate.Subject -eq $MSSubject
@@ -594,7 +591,7 @@ filter ProcessFile{
       }
     }
 
-    OrganizeThis $InfoByPathByType $iPath,$iType $info
+    OrganizeThis $InfoByPathByType $info.Path,$info.fType $info
     
     $null=$FullList.Add($info)
   }
@@ -613,7 +610,7 @@ filter ProcessFile{
 
 $32BinNames  = $Sys32BinList.Name.ToUpperInvariant() | sort-object -Unique
 $64BinNames  = $Sys64BinList.Name.ToUpperInvariant() | sort-object -Unique
-$SysBinNames = $32BinNames + $64BinNames | sort-object -Unique
+$SysBinNames = ($32BinNames + $64BinNames | sort-object -Unique).where{$_ -ne 'DISMHOST.EXE'}
 $32DLLNames  = $Sys32DLLList.Name.ToUpperInvariant() | sort-object -Unique
 $64DLLNames  = $Sys64DLLList.Name.ToUpperInvariant() | sort-object -Unique
 $SysDLLNames = $32DLLNames + $64DLLNames | sort-object -Unique

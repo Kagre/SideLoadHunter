@@ -15,6 +15,7 @@ The main functions of SideLoadHunter are:
 +Get-SusShimcache
 +Get-SusExecs
 +Get-SusDlls
++Get-SusHashCloaking
 
 Upon completion of the analysis, the results will be exported into CSV files to
  a folder named with the hostname value and current date.
@@ -62,9 +63,9 @@ if(!$AutoRun){
 }
 
 #hashing helper-function
-$MD5    = [System.Security.Cryptography.HashAlgorithm]::Create('MD5')
-$SHA1   = [System.Security.Cryptography.HashAlgorithm]::Create('SHA1')
-$SHA256 = [System.Security.Cryptography.HashAlgorithm]::Create('SHA256')
+$MD5    = [System.Security.Cryptography.HashAlgorithm]::Create('MD5')    #can be fooled, but not by hapenstance
+$SHA1   = [System.Security.Cryptography.HashAlgorithm]::Create('SHA1')   #harder but still can be fooled, verify both MD5 and SHA1 match
+$SHA256 = [System.Security.Cryptography.HashAlgorithm]::Create('SHA256') #verifies that two files are the same. Not ok for password storage, use KDF with CPU and RAM hardness
 function HashThis{
   param([byte[]]$bar)process{
   if($bar -eq $null){return $null}
